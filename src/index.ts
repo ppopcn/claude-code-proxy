@@ -124,49 +124,45 @@ export default {
             return new Response("Method Not Allowed", { status: 405 });
         }
 
-        const apiKey = request.headers.get('x-api-key');
-        if (!apiKey) {
-        //    return new Response(JSON.stringify({ error: 'The "x-api-key" header is missing.' }), {
-        //        status: 401,
-        //        headers: { 'Content-Type': 'application/json' },
-        //    });
+        // Claude CLI 可能不发送认证头部，我们使用配置的密钥
+        let effectiveApiKey = request.headers.get('x-api-key') || 
+                             request.headers.get('anthropic-auth-token') ||
+                             request.headers.get('Authorization')?.replace('Bearer ', '');
+        
+        // 如果没有从请求头获取到密钥，使用环境变量中的密钥
+        if (!effectiveApiKey) {
+            effectiveApiKey = env.HAIKU_API_KEY;
+            console.log('Using fallback API key from environment');
         }
+        
+        console.log('API Key status:', effectiveApiKey ? 'available' : 'missing');
 
+        // 从 Claude 请求中获取配置信息
+        // Claude Code 会在请求中发送模型名和认证信息
         try {
             const claudeRequest: ClaudeMessagesRequest = await request.json();
-
-            // --- Configuration Selection ---
-            // The API key from the header is used by default for all dynamic requests.
-            let targetApiKey: string; // = apiKey;
-            let targetModelName: string;
-            let targetBaseUrl: string;
-
-            // Check for the "haiku" specific route first.
-            const isHaiku = claudeRequest.model.toLowerCase().includes("haiku");
-            if (isHaiku) {
-                targetModelName = env.HAIKU_MODEL_NAME;
-                targetBaseUrl = env.HAIKU_BASE_URL;
-                targetApiKey = env.HAIKU_API_KEY; // Use the specific key for Haiku
-            } else {
-                // Try to parse the base URL and model from the dynamic path.
-                const dynamicConfig = parsePathAndModel(url.pathname);
-                if (dynamicConfig) {
-                    targetBaseUrl = dynamicConfig.baseUrl;
-                    targetModelName = dynamicConfig.modelName;
-                } else {
-                    return new Response(JSON.stringify({ error: 'The "url" is missing.' }), {
-                        status: 401,
-                        headers: { 'Content-Type': 'application/json' },
-                    });
+            
+            // 从请求头或请求体中获取配置
+            let targetApiKey = effectiveApiKey;
+            let targetModelName = claudeRequest.model;
+            let targetBaseUrl = "https://integrate.api.nvidia.com/v1"; // 默认 NVIDIA API
+            
+            // 如果模型名包含特殊格式，解析出真实配置
+            // 格式: "api_key|base_url|model_name" 或直接使用模型名
+            if (targetModelName.includes('|')) {
+                const parts = targetModelName.split('|');
+                if (parts.length === 3) {
+                    targetApiKey = parts[0];
+                    targetBaseUrl = parts[1];
+                    targetModelName = parts[2];
                 }
             }
-
-            if (!targetBaseUrl || !targetModelName) {
-                return new Response(JSON.stringify({ error: 'Could not determine target base URL or model name. Ensure the URL format is correct or fallback environment variables are set.' }), {
-                    status: 400,
-                    headers: { 'Content-Type': 'application/json', ...corsHeaders() },
-                });
-            }
+            
+            console.log('Parsed config:', {
+                modelName: targetModelName,
+                baseUrl: targetBaseUrl,
+                hasApiKey: !!targetApiKey
+            });
 
             const target = {
                 modelName: targetModelName,
@@ -175,6 +171,12 @@ export default {
             };
 
             const openaiRequest = convertClaudeToOpenAIRequest(claudeRequest, target.modelName);
+            
+            console.log('Converted OpenAI request:', {
+                model: openaiRequest.model,
+                messagesCount: openaiRequest.messages?.length,
+                maxTokens: openaiRequest.max_tokens
+            });
 
             const openaiApiResponse = await fetch(`${target.baseUrl}/chat/completions`, {
                 method: "POST",
@@ -185,8 +187,15 @@ export default {
                 body: JSON.stringify(openaiRequest),
             });
 
+            console.log('NVIDIA API response:', {
+                status: openaiApiResponse.status,
+                statusText: openaiApiResponse.statusText,
+                ok: openaiApiResponse.ok
+            });
+
             if (!openaiApiResponse.ok) {
                 const errorBody = await openaiApiResponse.text();
+                console.log('NVIDIA API error:', errorBody);
                 return new Response(errorBody, {
                     status: openaiApiResponse.status,
                     statusText: openaiApiResponse.statusText,
